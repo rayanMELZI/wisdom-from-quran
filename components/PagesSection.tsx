@@ -20,9 +20,9 @@ async function IgCards() {
       />
       <IgCard
         name="حكمة من القرآن"
-        handle="@wisdom.quran.ar"
+        handle="@wisdom.from.quran"
         avatarSrc="/ig-purple.png"
-        profileUrl="https://www.instagram.com/wisdom.quran.ar/"
+        profileUrl="https://www.instagram.com/wisdom.from.quran/"
         profile={purple}
       />
     </>
