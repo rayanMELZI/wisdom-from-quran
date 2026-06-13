@@ -1,98 +1,127 @@
-name: CI/CD
+name: Wisdom From Quran CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
   pull_request:
-  workflow_dispatch:
+    branches:
+      - main
+
+concurrency:
+  group: "deploy"
+  cancel-in-progress: true
+
+env:
+  GITHUB_SHORT_SHA: ${{ github.sha }}
+  REPOSITORY_OWNER: rayanmelzi
+  REPOSITORY_NAME: wisdom-from-quran
 
 jobs:
   build:
-    name: Build app
+    name: 📦 Build
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v3
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: 2. Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
         with:
-          node-version: 20
-          cache: npm
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
 
-      - name: Install dependencies
-        run: npm ci
+      - name: 3. Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
 
-      - name: Build application
-        run: npm run build
+      - name: 4. Cache NPM dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: 5. Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ env.REPOSITORY_OWNER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 6. Build and Push Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:${{ env.GITHUB_SHORT_SHA }}
+            ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:latest
+          cache-from: |
+            type=local,src=/tmp/.buildx-cache
+            type=registry,ref=ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:latest
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: 7. Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
   deploy:
-    name: Deploy to VM
+    name: 🚀 Deploy
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-
+    environment: prod
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v3
 
-      - name: Install SSH key
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s' "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: 2. Create .env file from GitHub secrets
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-
-      - name: Create deployment directory
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          ssh -i ~/.ssh/id_rsa -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.SSH_DEPLOY_PATH }}
+          echo "$SECRETS_CONTEXT" | jq -r 'to_entries |
+            map(select(.key | test("^(VM_|GITHUB_)") | not)) |
+            map("\(.key)=\(.value)") |
+            .[]' > .env
 
-      - name: Sync files to VM
-        run: |
-          rsync -az --delete \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='.next' \
-            --exclude='.env*' \
-            -e "ssh -i ~/.ssh/id_rsa -p $SSH_PORT" \
-            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH"
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.SSH_DEPLOY_PATH }}
+      - name: 3. Copy docker-compose.yaml and .env to server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT }}
+          source: "docker-compose.yaml,.env"
+          target: ~/Desktop/wisdom-from-quran
+          rm: true
 
-      - name: Install, build, and restart on VM
-        run: |
-          ssh -i ~/.ssh/id_rsa -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "DEPLOY_PATH='$DEPLOY_PATH' APP_PORT='$APP_PORT' bash -s" <<'EOF'
-          set -euo pipefail
-          cd "$DEPLOY_PATH"
-          rm -rf .next
-          npm ci
-          npm run build
-
-          if pm2 describe wisdom-from-quran >/dev/null 2>&1; then
-            PORT="$APP_PORT" pm2 reload wisdom-from-quran --update-env
-          else
-            PORT="$APP_PORT" pm2 start npm --name wisdom-from-quran -- start
-          fi
-
-          pm2 save
-          EOF
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.SSH_DEPLOY_PATH }}
-          APP_PORT: ${{ secrets.APP_PORT || '3000' }}
+      - name: 4. Deploy to Server via SSH
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT }}
+          script: |
+            cd ~/Desktop/wisdom-from-quran
+            echo "Deploying version: ${{ env.GITHUB_SHORT_SHA }}"
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ env.REPOSITORY_OWNER }} --password-stdin
+            docker pull ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:${{ env.GITHUB_SHORT_SHA }}
+            docker compose down || true
+            TAG=${{ env.GITHUB_SHORT_SHA }} docker compose up -d
+            docker image prune -af
