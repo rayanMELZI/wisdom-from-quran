@@ -86,6 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     environment: prod
+
     steps:
       - name: 1. Checkout Repository
         uses: actions/checkout@v3
@@ -95,33 +96,57 @@ jobs:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           echo "$SECRETS_CONTEXT" | jq -r 'to_entries |
-            map(select(.key | test("^(VM_|GITHUB_)") | not)) |
+            map(select(.key | test("^(VM_|GITHUB_|CF_)") | not)) |
             map("\(.key)=\(.value)") |
             .[]' > .env
 
-      - name: 3. Copy docker-compose.yaml and .env to server
-        uses: appleboy/scp-action@v0.1.4
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT }}
-          source: "docker-compose.yaml,.env"
-          target: ~/Desktop/wisdom-from-quran
-          rm: true
+      - name: 3. Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
+          sudo dpkg -i cloudflared.deb
 
-      - name: 4. Deploy to Server via SSH
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT }}
-          script: |
+      - name: 4. Setup SSH key and config
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          cat > ~/.ssh/config <<EOF
+          Host ${{ secrets.VM_HOST }}
+            HostName ${{ secrets.VM_HOST }}
+            User ${{ secrets.VM_USER }}
+            Port ${{ secrets.VM_PORT }}
+            IdentityFile ~/.ssh/id_rsa
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking no
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: 5. Create deploy folder on server
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "mkdir -p ~/Desktop/wisdom-from-quran"
+
+      - name: 6. Copy docker-compose.yaml and .env to server
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          scp docker-compose.yaml .env ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/Desktop/wisdom-from-quran/
+
+      - name: 7. Deploy via SSH
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} bash <<'ENDSSH'
+            set -e
             cd ~/Desktop/wisdom-from-quran
             echo "Deploying version: ${{ env.GITHUB_SHORT_SHA }}"
-            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ env.REPOSITORY_OWNER }} --password-stdin
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ env.REPOSITORY_OWNER }} --password-stdin
             docker pull ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:${{ env.GITHUB_SHORT_SHA }}
             docker compose down || true
             TAG=${{ env.GITHUB_SHORT_SHA }} docker compose up -d
             docker image prune -af
+          ENDSSH
