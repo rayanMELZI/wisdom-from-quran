@@ -122,18 +122,12 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: 5. Create deploy folder on server
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "mkdir -p ~/Desktop/wisdom-from-quran"
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "mkdir -p /opt/wisdom-from-quran"
 
       - name: 6. Copy docker-compose.yaml and .env to server
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          scp docker-compose.yaml .env ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/Desktop/wisdom-from-quran/
+          scp docker-compose.yaml .env ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/opt/wisdom-from-quran/
 
       - name: 7. Deploy via SSH
         env:
@@ -142,11 +136,19 @@ jobs:
         run: |
           ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} bash <<'ENDSSH'
             set -e
-            cd ~/Desktop/wisdom-from-quran
+            cd /opt/wisdom-from-quran
+            
             echo "Deploying version: ${{ env.GITHUB_SHORT_SHA }}"
+            
+            # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ env.REPOSITORY_OWNER }} --password-stdin
+            
             docker pull ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:${{ env.GITHUB_SHORT_SHA }}
+            
             docker compose down || true
-            TAG=${{ env.GITHUB_SHORT_SHA }} docker compose up -d
+            TAG=${{ env.GITHUB_SHORT_SHA }} docker compose up -d --force-recreate
+            
             docker image prune -af
+            
+            echo "✅ Deployment of version ${{ env.GITHUB_SHORT_SHA }} completed successfully"
           ENDSSH
