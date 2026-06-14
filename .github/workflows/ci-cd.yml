@@ -145,10 +145,10 @@ jobs:
             
             docker pull ghcr.io/${{ env.REPOSITORY_OWNER }}/${{ env.REPOSITORY_NAME }}:${{ env.GITHUB_SHORT_SHA }}
             
-            docker compose down || true
+            docker compose down --remove-orphans || true
             TAG=${{ env.GITHUB_SHORT_SHA }} docker compose up -d --force-recreate
             
-            docker image prune -af
+            docker image prune -af --filter "until=24h"
             
             echo "✅ Deployment of version ${{ env.GITHUB_SHORT_SHA }} completed successfully"
           ENDSSH
